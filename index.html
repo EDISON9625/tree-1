@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<meta name="theme-color" content="#02050a">
+<meta name="theme-color" content="#000000">
 <title>🎄 Merry Christmas</title>
 <style>
-  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #02050a; }
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
   canvas { display: block; width: 100vw; height: 100vh; }
 </style>
 </head>
@@ -18,39 +18,53 @@
 
   // ================= 配置 =================
   const CFG = {
-    count: 1300,          // 树身粒子数量（手机可跑，觉得不够再加）
-    photoCount: 10,      // 照片张数（自动探测 photos/1.jpg ~ photos/N.jpg）
-    useTopPhoto: true,   // 是否用 photos/top.jpg 当封面（没有就跳过）
-    growDuration: 5.2,   // 树长出来的时长（秒）
-    photoDelay: 1.0,     // 树完成后隔多久开始出现照片（秒）
-    photoStagger: 0.1    // 每张照片之间错开的间隔（秒）
+    rows: 26,                              // 树的层数
+    cols: 33,                              // 树最宽处的字符数
+    printDur: 2400,                        // 打印树耗时（毫秒）
+    greeting1: 'Merry Christmas',
+    greeting2: '今年的圣诞节可以和你一起过吗？',
+    lightChance: 0.10,                     // 彩灯密度
+    snowCount: 90,
+    leafChars: ['*', '✧', '✦', '✿', '❀', '·', '✱'],
+    leafColors: ['#1c6b36', '#279348', '#37b45c', '#2aa14f', '#4fd276'],
+    lightColors: ['#ff4d4d', '#ffd93d', '#59a8ff', '#ffffff', '#ff8ad8', '#7dffb0'],
+    trunkChars: ['#', '▌'],
+    trunkColor: '#8a6d3b'
   };
 
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
+  const staticCanvas = document.createElement('canvas');
+  const sctx = staticCanvas.getContext('2d');
+
   let W = 0, H = 0, DPR = 1;
+  let fontSize = 16, charW = 9, lineH = 17;
+  let topY = 0;
+  let treeBottomY = 0;
 
-  // ================= 状态 =================
-  let t0 = 0;                       // 动画起点
-  let tree = [];                    // 树粒子
-  let flakes = [];                  // 雪花
-  let stars = [];                   // 星空
-  let photos = [];                  // 已加载的照片 {img}
-  let photoSlots = [];              // 照片位置 {x, y, w, h, rot}
-  let zoomed = -1;                  // 当前放大的照片索引（-1 = 无）
-  let geo = null;                   // 树的几何参数
+  let t0 = 0;               // 动画起点
+  let state = 'print';      // print | lights | done
+  let lightsOnAt = 0;
+  let typed = 0;            // 已打出的字符数
+  let typingDone = false;
+  let greeted = false;
 
-  // ================= 工具 =================
+  const leaves = [];        // 静态字符 {x, y, ch, color}
+  const lights = [];        // 彩灯 {x, y, color, phase, speed}
+  let star = null;          // 树顶星
+  let flakes = [];
+
+  const now = () => performance.now();
   const rand = (a, b) => a + Math.random() * (b - a);
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-  const easeOutCubic = (p) => 1 - Math.pow(1 - p, 3);
   const easeOutBack = (p) => {
     const c1 = 1.70158, c3 = c1 + 1;
     return 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2);
   };
+  const easeOutCubic = (p) => 1 - Math.pow(1 - p, 3);
 
-  // ================= 尺寸 =================
-  function resize() {
+  // ================= 布局 =================
+  function layout() {
     DPR = Math.min(window.devicePixelRatio || 1, 2);
     W = window.innerWidth;
     H = window.innerHeight;
@@ -59,412 +73,261 @@
     canvas.style.width = W + 'px';
     canvas.style.height = H + 'px';
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    buildScene();
-  }
+    staticCanvas.width = canvas.width;
+    staticCanvas.height = canvas.height;
+    sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 
-  function buildScene() {
-    buildGeometry();
+    // 字号：保证树 + 两行祝福语都放得下
+    const fsW = (W * 0.92) / CFG.cols / 0.62;
+    const fsH = (H * 0.84) / (CFG.rows + 5.5);
+    fontSize = Math.max(9, Math.min(fsW, fsH, 26));
+    charW = fontSize * 0.62;
+    lineH = fontSize * 1.06;
+    topY = Math.max(fontSize * 2.2, H * 0.085);
+    treeBottomY = topY + CFG.rows * lineH;
+
     buildTree();
     buildSnow();
-    buildStars();
-    layoutPhotos();
-    if (t0 === 0) t0 = now();
+    reset();
   }
 
-  function now() {
-    return performance.now();
-  }
-
-  function elapsed() {
-    return (now() - t0) / 1000;
-  }
-
-  // ================= 几何 =================
-  function buildGeometry() {
-    const maxR = Math.min(W * 0.30, H * 0.26);
-    const treeH = Math.min(H * 0.58, W * 1.02);
-    const baseY = H * 0.82;
-    geo = {
-      cx: W / 2,
-      maxR: maxR,
-      treeH: treeH,
-      baseY: baseY,
-      topY: baseY - treeH
-    };
-  }
-
-  // ================= 树粒子 =================
   function buildTree() {
-    tree = [];
-    const g = geo;
-    for (let i = 0; i < CFG.count; i++) {
-      // t: 0 = 树底, 1 = 树顶（底部粒子多一些）
-      const t = Math.pow(Math.random(), 1.15);
-      const y = g.baseY - t * g.treeH;
-      const radius = g.maxR * (1 - t) * (0.18 + 0.82 * Math.sqrt(Math.random()));
-      const angle = t * Math.PI * 7 + rand(-0.6, 0.6);
-      const x = g.cx + Math.cos(angle) * radius;
+    leaves.length = 0;
+    lights.length = 0;
 
-      const roll = Math.random();
-      let color, size, glow;
-      if (roll < 0.88) {
-        // 绿色针叶
-        const shade = 0.55 + Math.random() * 0.45;
-        color = 'rgba(22,' + Math.round(120 + 90 * shade) + ',' + Math.round(50 + 40 * shade) + ',1)';
-        size = rand(1.2, 2.4);
-        glow = false;
-      } else if (roll < 0.96) {
-        // 金色装饰
-        color = 'rgba(255,214,110,1)';
-        size = rand(2.4, 3.8);
-        glow = true;
-      } else {
-        // 红色装饰
-        color = 'rgba(240,90,80,1)';
-        size = rand(2.6, 4.2);
-        glow = true;
+    const startX = W / 2 - (CFG.cols * charW) / 2;
+    for (let r = 0; r < CFG.rows; r++) {
+      const t = r / (CFG.rows - 1);
+      const w = 1 + Math.round(t * (CFG.cols - 1));
+      const y = topY + r * lineH;
+      const off = Math.floor((CFG.cols - w) / 2);
+      for (let i = 0; i < w; i++) {
+        const x = startX + (off + i) * charW;
+        if (Math.random() < CFG.lightChance) {
+          lights.push({
+            x: x,
+            y: y,
+            color: CFG.lightColors[Math.floor(Math.random() * CFG.lightColors.length)],
+            phase: rand(0, Math.PI * 2),
+            speed: rand(1.6, 3.6)
+          });
+        } else {
+          leaves.push({
+            x: x + charW * 0.02,
+            y: y,
+            ch: CFG.leafChars[Math.floor(Math.random() * CFG.leafChars.length)],
+            color: CFG.leafColors[Math.floor(Math.random() * CFG.leafColors.length)]
+          });
+        }
       }
+    }
 
-      tree.push({
-        tx: x,
-        ty: y,
-        sx: g.cx + rand(-g.maxR * 1.6, g.maxR * 1.6),
-        sy: g.baseY + rand(10, 70),
-        delay: t * CFG.growDuration * 0.85 + rand(0, 0.22),
-        dur: rand(0.75, 1.15),
-        color: color,
-        size: size,
-        glow: glow,
-        phase: rand(0, Math.PI * 2)
-      });
+    // 树干：树底下方两行
+    const trunkW = 3;
+    const trunkOff = Math.floor((CFG.cols - trunkW) / 2);
+    for (let r = 0; r < 2; r++) {
+      const y = treeBottomY + r * lineH;
+      for (let i = 0; i < trunkW; i++) {
+        leaves.push({
+          x: startX + (trunkOff + i) * charW,
+          y: y,
+          ch: CFG.trunkChars[i % 2],
+          color: CFG.trunkColor
+        });
+      }
+    }
+
+    // 树顶星星
+    star = {
+      x: W / 2,
+      y: topY - lineH * 1.05,
+      r: fontSize * 0.72
+    };
+
+    // 画静态层
+    sctx.clearRect(0, 0, W, H);
+    sctx.font = Math.round(fontSize) + 'px "Courier New", "Noto Sans Mono", monospace';
+    sctx.textAlign = 'left';
+    sctx.textBaseline = 'middle';
+    for (let i = 0; i < leaves.length; i++) {
+      const l = leaves[i];
+      sctx.fillStyle = l.color;
+      sctx.fillText(l.ch, l.x, l.y);
     }
   }
 
-  // ================= 雪花 =================
   function buildSnow() {
     flakes = [];
-    const n = Math.round(Math.min(W * H / 16000, 130));
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < CFG.snowCount; i++) {
       flakes.push({
         x: rand(0, W),
         y: rand(0, H),
-        r: rand(0.6, 2.2),
-        sp: rand(6, 24),
-        sway: rand(0.4, 1.4),
-        ph: rand(0, Math.PI * 2)
+        sp: rand(8, 30),
+        sway: rand(0.3, 1.2),
+        ph: rand(0, Math.PI * 2),
+        ch: Math.random() < 0.5 ? '❄' : '·',
+        a: rand(0.25, 0.6)
       });
     }
   }
 
-  // ================= 星空 =================
-  function buildStars() {
-    stars = [];
-    const n = Math.round(W * H / 22000);
-    for (let i = 0; i < n; i++) {
-      stars.push({
-        x: rand(0, W),
-        y: rand(0, H * 0.75),
-        r: rand(0.3, 1.1),
-        ph: rand(0, Math.PI * 2)
-      });
-    }
+  function reset() {
+    t0 = now();
+    state = 'print';
+    typed = 0;
+    typingDone = false;
+    greeted = false;
+    lightsOnAt = 0;
   }
 
-  // ================= 照片 =================
-  let loadedPhotos = null;
-
-  function probePhotos() {
-    if (loadedPhotos !== null) return;
-    loadedPhotos = [];
-    const urls = [];
-    if (CFG.useTopPhoto) urls.push('photos/top.jpg');
-    for (let i = 1; i <= CFG.photoCount; i++) urls.push('photos/' + i + '.jpg');
-
-    let pending = urls.length;
-    const collected = [];
-
-    urls.forEach(function (u, idx) {
-      const img = new Image();
-      img.onload = function () {
-        collected.push({ img: img, idx: idx });
-        if (--pending === 0) applyPhotos(collected);
-      };
-      img.onerror = function () {
-        if (--pending === 0) applyPhotos(collected);
-      };
-      img.src = u;
-    });
-  }
-
-  function applyPhotos(list) {
-    // 按编号排序，保证 top.jpg 在最前面
-    list.sort(function (a, b) { return a.idx - b.idx; });
-    photos = list;
-    layoutPhotos();
-  }
-
-  function layoutPhotos() {
-    photoSlots = [];
-    if (!photos.length) return;
-    const g = geo;
-    const n = photos.length;
-    const midY = g.baseY - g.treeH * 0.48;
-    const baseR = g.maxR * 1.55 + 26;
-    const size = Math.min(W, H) * 0.15;
-
-    for (let i = 0; i < n; i++) {
-      const ang = -Math.PI / 2 + (i / n) * Math.PI * 2 + 0.3;
-      const r = baseR + (i % 2 === 0 ? 0 : 14);
-      const x = g.cx + Math.cos(ang) * r;
-      const y = midY + Math.sin(ang) * r * 0.92;
-      photoSlots.push({
-        x: clamp(x, size * 0.7, W - size * 0.7),
-        y: clamp(y, size * 0.9, H - size * 0.7),
-        w: size,
-        h: size * 1.02,
-        rot: rand(-0.12, 0.12),
-        bob: i
-      });
-    }
-  }
-
-  // ================= 背景 =================
-  function drawBackground(el) {
-    // 夜空渐变
-    const grad = ctx.createLinearGradient(0, 0, 0, H);
-    grad.addColorStop(0, '#030812');
-    grad.addColorStop(0.6, '#04101c');
-    grad.addColorStop(1, '#02070e');
-    ctx.fillStyle = grad;
+  // ================= 绘制 =================
+  function drawBg() {
+    const g = ctx.createRadialGradient(W / 2, H * 0.42, 10, W / 2, H * 0.42, Math.max(W, H) * 0.75);
+    g.addColorStop(0, '#071a0d');
+    g.addColorStop(0.55, '#030b06');
+    g.addColorStop(1, '#000000');
+    ctx.fillStyle = g;
     ctx.fillRect(0, 0, W, H);
-
-    // 星星闪烁
-    for (let i = 0; i < stars.length; i++) {
-      const s = stars[i];
-      const a = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(el * 1.2 + s.ph));
-      ctx.fillStyle = 'rgba(220,235,255,' + (a * 0.8).toFixed(3) + ')';
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // 地面柔光
-    const g = geo;
-    const gr = ctx.createRadialGradient(g.cx, g.baseY + 10, 4, g.cx, g.baseY + 10, g.maxR * 2.1);
-    gr.addColorStop(0, 'rgba(60,140,90,0.18)');
-    gr.addColorStop(1, 'rgba(60,140,90,0)');
-    ctx.fillStyle = gr;
-    ctx.beginPath();
-    ctx.ellipse(g.cx, g.baseY + 12, g.maxR * 2.1, 34, 0, 0, Math.PI * 2);
-    ctx.fill();
   }
 
-  // ================= 树 =================
-  function drawTree(el) {
-    for (let i = 0; i < tree.length; i++) {
-      const p = tree[i];
-      const prog = clamp((el - p.delay) / p.dur, 0, 1);
-      if (prog <= 0) continue;
-      const e = easeOutCubic(prog);
-      const x = p.sx + (p.tx - p.sx) * e;
-      const y = p.sy + (p.ty - p.sy) * e;
-      const s = p.size * (0.45 + 0.55 * e);
-      const tw = p.glow ? (0.7 + 0.3 * Math.sin(el * 2.6 + p.phase)) : (0.6 + 0.4 * (0.5 + 0.5 * Math.sin(el * 1.3 + p.phase)));
-
-      ctx.globalAlpha = clamp(e * tw, 0, 1);
-      if (p.glow) {
-        // 外圈柔光（比 shadowBlur 快很多）
-        ctx.globalAlpha = clamp(e * tw * 0.25, 0, 1);
-        ctx.fillStyle = p.color;
-        ctx.beginPath();
-        ctx.arc(x, y, s * 2.4, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = clamp(e * tw, 0, 1);
-      }
-      ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(x, y, s, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    ctx.shadowBlur = 0;
-  }
-
-  // ================= 树顶星星 =================
-  function drawStar(el) {
-    const g = geo;
-    const t = clamp((el - (CFG.growDuration * 0.92 + 0.25)) / 0.7, 0, 1);
-    if (t <= 0) return;
-    const sc = easeOutBack(t);
-    const r = Math.max(9, Math.min(W, H) * 0.028) * sc;
-    const x = g.cx;
-    const y = g.topY - Math.max(10, Math.min(W, H) * 0.03) * sc;
-    const tw = 0.75 + 0.25 * Math.sin(el * 2.2);
-
-    ctx.save();
-    ctx.translate(x, y);
-    // 光晕
-    const halo = ctx.createRadialGradient(0, 0, 2, 0, 0, r * 3.2);
-    halo.addColorStop(0, 'rgba(255,220,130,' + (0.55 * tw).toFixed(3) + ')');
-    halo.addColorStop(1, 'rgba(255,220,130,0)');
-    ctx.fillStyle = halo;
-    ctx.beginPath();
-    ctx.arc(0, 0, r * 3.2, 0, Math.PI * 2);
-    ctx.fill();
-    // 五角星
-    ctx.beginPath();
-    for (let i = 0; i < 10; i++) {
-      const ang = (i * Math.PI) / 5 - Math.PI / 2;
-      const rad = i % 2 === 0 ? r : r * 0.44;
-      const px = Math.cos(ang) * rad;
-      const py = Math.sin(ang) * rad;
-      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-    }
-    ctx.closePath();
-    ctx.fillStyle = 'rgba(255,224,140,' + tw.toFixed(3) + ')';
-    ctx.shadowColor = 'rgba(255,200,90,0.9)';
-    ctx.shadowBlur = 18;
-    ctx.fill();
-    ctx.restore();
-    ctx.shadowBlur = 0;
-  }
-
-  // ================= 照片 =================
-  function drawPhotos(el) {
-    if (!photos.length) return;
-    const start = CFG.growDuration + CFG.photoDelay;
-    for (let i = 0; i < photos.length; i++) {
-      const slot = photoSlots[i];
-      if (!slot) continue;
-      const ap = clamp((el - (start + i * CFG.photoStagger)) / 0.7, 0, 1);
-      if (ap <= 0) continue;
-      const e = easeOutBack(ap);
-      const bob = Math.sin(el * 1.1 + slot.bob) * 3;
-      const img = photos[i].img;
-
-      ctx.save();
-      ctx.translate(slot.x, slot.y + bob);
-      ctx.rotate(slot.rot);
-      ctx.scale(0.6 + 0.4 * e, 0.6 + 0.4 * e);
-      ctx.globalAlpha = clamp(ap, 0, 1);
-
-      // 拍立得白框
-      ctx.shadowColor = 'rgba(0,0,0,0.55)';
-      ctx.shadowBlur = 14;
-      ctx.fillStyle = '#f7f3ea';
-      const w = slot.w, h = slot.h;
-      roundRect(ctx, -w / 2, -h / 2, w, h, 4);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-
-      // 照片
-      if (img && img.complete && img.naturalWidth > 0) {
-        const pad = 6;
-        const iw = w - pad * 2;
-        const ih = h - pad * 2 - 8;
-        // 等比裁剪填充
-        const s = Math.max(iw / img.naturalWidth, ih / img.naturalHeight);
-        const dw = img.naturalWidth * s;
-        const dh = img.naturalHeight * s;
-        ctx.save();
-        roundRect(ctx, -w / 2 + pad, -h / 2 + pad, iw, ih, 2);
-        ctx.clip();
-        ctx.drawImage(img, -w / 2 + pad + (iw - dw) / 2, -h / 2 + pad + (ih - dh) / 2, dw, dh);
-        ctx.restore();
-      }
-      ctx.restore();
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  function roundRect(c, x, y, w, h, r) {
-    c.beginPath();
-    c.moveTo(x + r, y);
-    c.arcTo(x + w, y, x + w, y + h, r);
-    c.arcTo(x + w, y + h, x, y + h, r);
-    c.arcTo(x, y + h, x, y, r);
-    c.arcTo(x, y, x + w, y, r);
-    c.closePath();
-  }
-
-  // ================= 雪花 =================
   function drawSnow(el, dt) {
-    ctx.fillStyle = 'rgba(235,245,255,0.55)';
+    ctx.font = Math.round(fontSize * 0.7) + 'px "Courier New", monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
     for (let i = 0; i < flakes.length; i++) {
       const f = flakes[i];
       f.y += f.sp * dt;
-      if (f.y > H + 4) { f.y = -4; f.x = rand(0, W); }
-      const x = f.x + Math.sin(el * f.sway + f.ph) * 14;
-      ctx.globalAlpha = 0.35 + 0.3 * Math.sin(el + f.ph);
-      ctx.beginPath();
-      ctx.arc(x, f.y, f.r, 0, Math.PI * 2);
-      ctx.fill();
+      if (f.y > H + 6) { f.y = -6; f.x = rand(0, W); }
+      const x = f.x + Math.sin(el * f.sway + f.ph) * 10;
+      ctx.globalAlpha = f.a;
+      ctx.fillStyle = '#cfe8ff';
+      ctx.fillText(f.ch, x, f.y);
     }
     ctx.globalAlpha = 1;
   }
 
-  // ================= 标题 =================
-  function drawTitle(el) {
-    const t = clamp((el - 0.6) / 1.2, 0, 1);
-    if (t <= 0) return;
-    const a = easeOutCubic(t);
-    const size = Math.max(22, Math.min(W, H) * 0.055);
+  function drawStatic(el) {
+    // 打印进度：按行裁剪
+    const p = clamp((el * 1000) / CFG.printDur, 0, 1);
+    const progress = CFG.rows * p;
+    const clipBottom = topY - lineH + progress * lineH + lineH * 0.6;
+
     ctx.save();
-    ctx.globalAlpha = a * 0.92;
+    ctx.beginPath();
+    ctx.rect(0, 0, W, clipBottom);
+    ctx.clip();
+    ctx.drawImage(staticCanvas, 0, 0, W, H);
+    ctx.restore();
+  }
+
+  function drawLights(el) {
+    if (state === 'print') return;
+    const t = (now() - lightsOnAt) / 1000;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < lights.length; i++) {
+      const l = lights[i];
+      const blink = 0.5 + 0.5 * Math.sin(t * l.speed + l.phase);
+      if (blink < 0.25) continue;
+      ctx.globalAlpha = clamp((blink - 0.25) / 0.75, 0, 1);
+      ctx.fillStyle = l.color;
+      ctx.font = Math.round(fontSize * (0.62 + 0.18 * blink)) + 'px "Courier New", monospace';
+      ctx.fillText('✱', l.x, l.y);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawStar(el) {
+    if (state === 'print') return;
+    const t = clamp(((now() - lightsOnAt) / 1000) / 0.5, 0, 1);
+    if (t <= 0) return;
+    const s = easeOutBack(t) * star.r;
+    const tw = 0.75 + 0.25 * Math.sin(el * 2.4);
+
+    ctx.save();
+    ctx.translate(star.x, star.y);
+    // 光晕
+    const halo = ctx.createRadialGradient(0, 0, 1, 0, 0, s * 3.4);
+    halo.addColorStop(0, 'rgba(255,220,120,' + (0.5 * tw).toFixed(3) + ')');
+    halo.addColorStop(1, 'rgba(255,220,120,0)');
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 3.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.translate(star.x, star.y);
+    ctx.font = Math.round(fontSize * 0.95 * (0.6 + 0.4 * t)) + 'px "Segoe UI Symbol", "Noto Sans Symbols 2", monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    const fs = '600 ' + size + 'px Georgia, "Times New Roman", serif';
-    ctx.font = fs;
-    const y = H * 0.10;
-    const grad = ctx.createLinearGradient(0, y - size, 0, y + size);
-    grad.addColorStop(0, '#fff4d0');
-    grad.addColorStop(1, '#d8a84a');
-    ctx.fillStyle = grad;
-    ctx.shadowColor = 'rgba(255,210,120,0.55)';
-    ctx.shadowBlur = 22;
-    ctx.fillText('Merry Christmas', W / 2, y);
-    // 副标题
-    ctx.shadowBlur = 0;
-    ctx.globalAlpha = a * 0.55;
-    ctx.font = '300 ' + Math.max(10, size * 0.22) + 'px Georgia, serif';
-    ctx.fillStyle = '#e8d9b0';
-    ctx.fillText('· 2025 ·', W / 2, y + size * 0.95);
+    ctx.fillStyle = 'rgba(255,224,140,' + tw.toFixed(3) + ')';
+    ctx.shadowColor = 'rgba(255,200,90,0.9)';
+    ctx.shadowBlur = 16;
+    ctx.fillText('★', 0, 0);
     ctx.restore();
+    ctx.shadowBlur = 0;
+  }
+
+  function drawGreeting(el) {
+    if (state === 'print') return;
+    const startedAt = lightsOnAt + 500; // 星星亮起后 0.5 秒开始打字
+    const typeSpeed = 42; // 每字毫秒
+    const g1 = CFG.greeting1;
+    const g2 = CFG.greeting2;
+    const total = g1.length + g2.length;
+    const elapsed = now() - startedAt;
+    typed = clamp(Math.floor(elapsed / typeSpeed), 0, total);
+
+    const show1 = Math.min(typed, g1.length);
+    const show2 = Math.max(0, typed - g1.length);
+
+    const y1 = treeBottomY + lineH * 2.1;
+    const y2 = y1 + lineH * 1.75;
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // 第一行
+    if (show1 > 0) {
+      ctx.font = 'bold ' + Math.round(fontSize * 1.15) + 'px "Courier New", monospace';
+      ctx.fillStyle = '#ffd700';
+      ctx.shadowColor = 'rgba(255,200,60,0.7)';
+      ctx.shadowBlur = 12;
+      ctx.fillText(g1.slice(0, show1), W / 2, y1);
+      ctx.shadowBlur = 0;
+    }
+
+    // 第二行
+    if (show2 > 0) {
+      ctx.font = Math.round(fontSize * 0.72) + 'px "Courier New", "PingFang SC", monospace';
+      ctx.fillStyle = '#ffd9e6';
+      ctx.fillText(g2.slice(0, show2), W / 2, y2);
+    }
+
+    // 光标
+    const typingNow = typed < total;
+    const cursorOn = typingNow || (Math.floor(now() / 550) % 2 === 0);
+    if (cursorOn && show2 > 0) {
+      const measure = ctx.measureText(g2.slice(0, show2)).width;
+      ctx.fillStyle = 'rgba(255,217,230,0.85)';
+      ctx.fillRect(W / 2 + measure / 2 + 4, y2 - fontSize * 0.42, fontSize * 0.34, fontSize * 0.8);
+    }
+
+    if (typed >= total) typingDone = true;
   }
 
   function drawHint(el) {
-    const start = CFG.growDuration + CFG.photoDelay + photos.length * CFG.photoStagger + 1.2;
-    const t = clamp((el - start) / 1.5, 0, 1);
-    if (t <= 0 || zoomed >= 0) return;
+    if (!typingDone) return;
+    const t = clamp(((now() - (lightsOnAt + 500 + (CFG.greeting1.length + CFG.greeting2.length) * 42)) / 800), 0, 1);
+    if (t <= 0) return;
     ctx.save();
-    ctx.globalAlpha = 0.35 * t;
+    ctx.globalAlpha = 0.28 * t;
     ctx.textAlign = 'center';
-    ctx.fillStyle = '#cbb98a';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#9ab8a4';
     ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
-    ctx.fillText('轻触屏幕重播 · 轻触照片查看', W / 2, H - 26);
-    ctx.restore();
-  }
-
-  // ================= 放大照片 =================
-  function drawZoom() {
-    if (zoomed < 0 || !photos[zoomed]) return;
-    const img = photos[zoomed].img;
-    if (!img || !img.complete || img.naturalWidth === 0) return;
-    const pad = 18;
-    ctx.fillStyle = 'rgba(0,0,0,0.82)';
-    ctx.fillRect(0, 0, W, H);
-    const maxW = W - pad * 2;
-    const maxH = H * 0.8;
-    const s = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight);
-    const dw = img.naturalWidth * s;
-    const dh = img.naturalHeight * s;
-    ctx.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
-    ctx.save();
-    ctx.globalAlpha = 0.45;
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#e8d9b0';
-    ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
-    ctx.fillText('轻触任意位置关闭', W / 2, H - 26);
+    ctx.fillText('轻触屏幕重播', W / 2, H - 22);
     ctx.restore();
   }
 
@@ -475,52 +338,32 @@
     const n = now();
     const dt = Math.min((n - lastT) / 1000, 0.05);
     lastT = n;
-    const el = elapsed();
+    const el = (n - t0) / 1000;
 
-    drawBackground(el);
+    drawBg();
     drawSnow(el, dt);
-    drawTree(el);
+
+    if (state === 'print' && (n - t0) >= CFG.printDur) {
+      state = 'lights';
+      lightsOnAt = n;
+    }
+
+    drawStatic(el);
+    drawLights(el);
     drawStar(el);
-    drawPhotos(el);
-    drawTitle(el);
+    drawGreeting(el);
     drawHint(el);
-    drawZoom();
 
     requestAnimationFrame(frame);
   }
 
   // ================= 交互 =================
-  function hitPhoto(px, py) {
-    for (let i = photos.length - 1; i >= 0; i--) {
-      const s = photoSlots[i];
-      if (!s) continue;
-      if (px > s.x - s.w / 2 && px < s.x + s.w / 2 && py > s.y - s.h / 2 && py < s.y + s.h / 2) return i;
-    }
-    return -1;
-  }
-
-  canvas.addEventListener('pointerdown', function (ev) {
-    const rect = canvas.getBoundingClientRect();
-    const x = ev.clientX - rect.left;
-    const y = ev.clientY - rect.top;
-
-    if (zoomed >= 0) { zoomed = -1; return; }
-
-    const el = elapsed();
-    const treeDone = el > CFG.growDuration + CFG.photoDelay + photos.length * CFG.photoStagger + 0.8;
-    if (treeDone) {
-      const idx = hitPhoto(x, y);
-      if (idx >= 0) { zoomed = idx; return; }
-    }
-    // 重播
-    t0 = now();
-    zoomed = -1;
+  canvas.addEventListener('pointerdown', function () {
+    reset();
   }, { passive: true });
 
-  // ================= 启动 =================
-  window.addEventListener('resize', function () { resize(); });
-  resize();
-  probePhotos();
+  window.addEventListener('resize', function () { layout(); });
+  layout();
   requestAnimationFrame(frame);
 })();
 </script>
